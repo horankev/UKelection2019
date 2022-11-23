@@ -1,0 +1,1218 @@
+---
+title: "Comparing regressions, spatial regressions and machine learning techniques"
+format: html
+editor: source
+---
+
+
+see: 
+
+**Spatial Models or Random Forest? Evaluating the Use of Spatially Explicit Machine Learning Methods to Predict Employment Density around New Transit Stations in Los Angeles** 
+
+Kevin Credit 
+*Geographical Analysis (2022) 54, 58–83* 
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+packages <- c(
+  "MASS",
+  "tidyverse",
+  "sf",
+  "tmap",
+  "here",
+  "spdep", # areal data
+  "grid",
+  "GWmodel",
+  "kableExtra",
+  "cowplot",
+  "parlitools",
+  "corrplot",
+  "lme4",
+  "mgcv",
+  "ggfortify",
+  "ggforce", # has geom_circle
+  "gridExtra",
+  "car",
+  "rgeoda", # for LISA
+  "ggpubr",
+  "ggrepel",
+  "ggpointdensity",
+  "ggalt", # for geom_encircle
+  "ggsflabel", # has repel labels for sf
+  "viridis",
+  "spatialreg",
+  "rgdal",
+  "rgeos",
+  "randomForest",
+  "SpatialML" # spatial RF
+  )
+
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+tmap_mode("plot")
+rm(list=ls())
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# avoid conflict with dplyr and MASS::select
+select <- dplyr::select
+
+set.seed(123)
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df <- readRDS(here("df_withtext.rds")) |> 
+  mutate(degree_educated = degree,
+         professionals = industry_professional,
+         younger_adults = age_18_to_19 + age_20_to_24 + age_25_to_29,
+         english_speaking = english_all,
+         single_ethnicity_household = 100 - ethnicity_mixed,
+         not_good_health = health_fair + health_bad + health_very_bad,
+         white = ethnicity_white,
+         christian = christian,
+         own_home = house_owned,
+         no_car = cars_none,
+         density = density)
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# create neighbours list: polygon to nb
+nb <- poly2nb(df |> st_buffer(dist=2000), queen = TRUE)
+names(nb) <- factor(df$constituency_name)
+
+# create weights: nb to listw
+wts <- nb2listw(nb, zero.policy = TRUE)
+names(wts$neighbours) <- factor(df$constituency_name)
+names(wts$weights) <- factor(df$constituency_name)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# moran_test <- moran.test(df$con_swing, wts)
+# moran_test
+
+```
+
+## Ordinary Least Squares
+
+### 1. OLS
+
+```{r}
+
+fmla <- con_swing ~ 
+  degree_educated + 
+  english_speaking + 
+  not_good_health + 
+  white + 
+  LONG + 
+  LAT
+
+regOLS <-lm(fmla, df)
+summary(regOLS)
+```
+
+Check residual spatial dependence
+
+```{r}
+lmMoranTest <- lm.morantest(regOLS, wts)
+lmMoranTest
+
+```
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# Model selection via LM tests
+
+# lmLMtests <- lm.LMtests(regOLS, wts, test=c("LMerr", "LMlag", "RLMerr", "RLMlag", "SARMA"))
+# lmLMtests
+```
+
+## Spatial Models 
+
+### 2. SAR
+
+```{r}
+
+regSAR <- lagsarlm(fmla, data = df, wts)
+summary(regSAR)
+
+```
+
+### 3. SEM
+
+```{r}
+regSEM <- errorsarlm(fmla, data=df, wts)
+summary(regSEM)
+```
+
+### 4. SDM (Spatial Durbin Model)
+
+add lag X to SAR
+
+```{r}
+regSDM <- lagsarlm(fmla, data = df, wts, type="mixed")
+summary(regSDM)
+```
+
+### 5. SDEM (Spatial Durbin Error)
+
+add lag X to SEM
+
+```{r}
+regSDEM <- errorsarlm(fmla, data = df, wts, etype = "emixed")
+summary(regSDEM)
+```
+
+### 6. CAR
+
+```{r}
+
+regCAR1 <- gam(con_swing ~ degree_educated + 
+                 english_speaking + 
+                 not_good_health + 
+                 white + 
+                 LONG + 
+                 LAT +
+                 s(constituency_name,bs='mrf',xt=list(nb=nb),k=275),
+               data=df, family=gaussian, weight=total_vote_19, method='REML')
+summary(regCAR1)
+
+```
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 7. CAR2
+
+# regCAR2 <- gam(con_swing ~ PC1 + PC2 + LONG + LAT +
+#                 s(constituency_name,bs='mrf',xt=list(nb=nb),k=150, by = PC2) + 
+#                 s(constituency_name,bs='mrf',xt=list(nb=nb),k=250),
+#               data=df, family=gaussian, weight=total_vote_19, method='REML')
+# summary(regCAR2)
+
+```
+
+```{r}
+# results <- tibble(
+#   indep_vars = c("degree_educated", "english_speaking", "not_good_health", "white","LONG","LAT","lagdegree_educated","lagenglish_speaking","lagnot_good_health",
+#                  "lagwhite","lagLONG","lagLAT","lagY","rho","lambda","AIC"),
+#   OLS = c(coef(regOLS)["degree_educated"],coef(regOLS)["english_speaking"],coef(regOLS)["not_good_health"],coef(regOLS)["white"],coef(regOLS)["LONG"],coef(regOLS)["LAT"],0,0,0,0,0,0,0,0,0,AIC(regOLS)),
+#   SAR = c(coef(regSAR)["degree_educated"],coef(regSAR)["english_speaking"],coef(regSAR)["not_good_health"],coef(regSAR)["white"],coef(regSAR)["LONG"],coef(regSAR)["LAT"],0,0,0,0,0,0,coef(regSAR)["rho"],0,0,AIC(regSAR)),
+#   SEM = c(coef(regSEM)["degree_educated"],coef(regSEM)["english_speaking"],coef(regSEM)["not_good_health"],coef(regSEM)["white"],coef(regSEM)["LONG"],coef(regSEM)["LAT"],0,0,0,0,0,0,0,coef(regSEM)["lambda"],0,AIC(regSEM)),
+#   SDM = c(coef(regSDM)["degree_educated"],coef(regSDM)["english_speaking"],coef(regSDM)["not_good_health"],coef(regSDM)["white"],coef(regSDM)["LONG"],coef(regSDM)["LAT"],coef(regSDM)["lag.degree_educated"],coef(regSDM)["lag.english_speaking"],coef(regSDM)["lag.not_good_health"],coef(regSDM)["lag.white"],coef(regSDM)["lag.LONG"],coef(regSDM)["lag.LAT"],0,coef(regSDM)["rho"],0,AIC(regSDM)),
+#   SDEM = c(coef(regSDEM)["degree_educated"],coef(regSDEM)["english_speaking"],coef(regSDEM)["not_good_health"],coef(regSDEM)["white"],coef(regSDEM)["LONG"],coef(regSDEM)["LAT"],coef(regSDEM)["lag.degree_educated"],coef(regSDEM)["lag.english_speaking"],coef(regSDEM)["lag.not_good_health"],coef(regSDEM)["lag.white"],coef(regSDEM)["lag.LONG"],coef(regSDEM)["lag.LAT"],0,0,coef(regSDEM)["lambda"],AIC(regSDEM)),
+#   CAR1 = c(coef(regCAR1)["degree_educated"],coef(regCAR1)["english_speaking"],coef(regCAR1)["not_good_health"],coef(regCAR1)["white"],coef(regCAR1)["LONG"],coef(regCAR1)["LAT"],0,0,0,0,0,0,0,0,0,AIC(regCAR1))
+# )
+# results[,2:7] <- round(results[,2:7], 3)
+```
+
+## Random Forest Models
+
+### 7. RF
+
+```{r}
+set.seed(123)
+rf.fit <- randomForest(fmla, data=df, ntree=1500, 
+                       keep.forest=FALSE, importance=TRUE)
+
+#rf.fit
+
+# Get variable importance from the model fit
+ImpData.rf <- as.data.frame(randomForest::importance(rf.fit))
+
+```
+
+
+### 8. RFSAR
+
+First add spatially lagged variables to `df`
+
+```{r}
+df$lag.degree_educated <- lag.listw(wts,df$degree_educated)
+df$lag.english_speaking <- lag.listw(wts,df$english_speaking)
+df$lag.not_good_health <- lag.listw(wts,df$not_good_health)
+df$lag.white <- lag.listw(wts,df$white)
+df$lag.LONG <- lag.listw(wts,df$LONG)
+df$lag.LAT <- lag.listw(wts,df$LAT)
+df$lag.con_swing <- lag.listw(wts,df$con_swing)
+```
+
+```{r}
+rfsar.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT +
+                            lag.con_swing, data=df, ntree=1500, 
+                       keep.forest=FALSE, importance=TRUE)
+
+#rfsar.fit
+
+# Get variable importance from the model fit
+ImpData.rfsar <- as.data.frame(randomForest::importance(rfsar.fit))
+```
+
+### 9. RFSDM
+
+```{r}
+
+rfsdm.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT + 
+                            lag.degree_educated +
+                            lag.english_speaking +
+                            lag.not_good_health +
+                            lag.white + 
+                            lag.LONG +
+                            lag.LAT +
+                            lag.con_swing, 
+                          data=df, ntree=1500, keep.forest=FALSE, importance=TRUE)
+
+#rfsdm.fit
+
+# Get variable importance from the model fit
+ImpData.rfsdm <- as.data.frame(randomForest::importance(rfsdm.fit))
+
+```
+
+### 10. RFSLX
+
+```{r}
+
+rfslx.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT + 
+                            lag.degree_educated +
+                            lag.english_speaking +
+                            lag.not_good_health +
+                            lag.white + 
+                            lag.LONG +
+                            lag.LAT, 
+                          data=df, ntree=1500, keep.forest=FALSE, importance=TRUE)
+
+#rfslx.fit
+
+# Get variable importance from the model fit
+ImpData.rfslx <- as.data.frame(randomForest::importance(rfslx.fit))
+
+```
+
+
+## Random Forest + rotation
+
+### Find optimal rotation
+
+Rotate by 1/10 of pi/2 each time and calculate MAE
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df_ngrid <- df |> 
+  st_transform(crs=27700) |> 
+  mutate(centroid = st_centroid(geometry))
+
+error_df <- data.frame(angle=seq(0,pi/2,pi/2/10),
+                       error=rep(0,11))
+
+coords <- st_coordinates(df_ngrid$centroid)
+
+df_ngrid_nogeo <- df_ngrid |> st_drop_geometry()
+
+for (i in 1:nrow(error_df)){
+zzz <- df_ngrid_nogeo |> 
+  mutate(geometry=df$geometry) |> 
+  st_as_sf() |> 
+  st_transform(crs = 27700) |> 
+  select(con_swing,degree_educated, 
+                 english_speaking, 
+                 not_good_health, 
+                 white) |> 
+  st_drop_geometry()
+
+zzz <- cbind(zzz,Rotation(coords,error_df[i,1]))
+zzz <- zzz |> 
+  rename(X="1",
+         Y="2")
+d.tree_loop <- randomForest(con_swing ~ .,
+                data = zzz, ntree=1500, 
+                       keep.forest=FALSE, importance=TRUE)
+
+tree_est <- d.tree_loop$predicted
+error_df[i,2] <- sum(abs(tree_est - df_ngrid$con_swing)) / nrow(df_ngrid)
+}
+
+error_df <- error_df |> 
+  mutate(minMAE = case_when(error == min(error_df$error) ~ "min",
+                            TRUE ~ "other"))
+ggplot(error_df)+geom_point(aes(x=angle,y=error,colour=minMAE,size=minMAE)) + 
+  # geom_smooth(aes(x=angle,y=error)) +
+          scale_x_continuous(breaks  = c(seq(0, pi/2, pi/8)), 
+                    labels = c("0", "\u03c0/8", "\u03c0/4", "3\u03c0/8", "\u03c0/2")) + 
+  scale_colour_manual(values = c("red","black")) +
+  scale_size_manual(values = c(2,0.25))+
+  theme_bw() + 
+  labs(title = paste0("MAE of regression tree: min at ",round(error_df[which.min(error_df$error),1],3)),
+       subtitle = "for rotation from 0 to \u03c0")
+
+```
+
+### 11. RFr
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+coords <- st_coordinates(df_ngrid$centroid)
+
+df_ngrid_rot <- cbind(df_ngrid,Rotation(coords,error_df[which.min(error_df$error),1]))
+
+df_ngrid_rot <- df_ngrid_rot |> 
+  mutate(LONG=X1,
+         LAT=X2)
+
+ggplot(df_ngrid_rot) + geom_point(aes(x=LONG, y=LAT)) + 
+  geom_sf(lwd=0.1) + 
+  coord_sf(datum = NA) + 
+  theme_bw() + 
+  labs(title = "Centroids",
+       subtitle = "Optimally rotated for minimum absolute squared error")
+
+fmla <- con_swing ~ 
+  degree_educated + 
+  english_speaking + 
+  not_good_health + 
+  white + 
+  LONG + 
+  LAT
+
+set.seed(123)
+rfr.fit <- randomForest(fmla, data=df_ngrid_rot, ntree=1500, 
+                       keep.forest=FALSE, importance=TRUE)
+
+#rf.fit
+
+# Get variable importance from the model fit
+ImpData.rfr <- as.data.frame(randomForest::importance(rfr.fit))
+
+```
+
+
+### 12. RFrSAR
+
+First add spatially lagged variables to `df`
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df_ngrid_rot$lag.degree_educated <- lag.listw(wts,df$degree_educated)
+df_ngrid_rot$lag.english_speaking <- lag.listw(wts,df$english_speaking)
+df_ngrid_rot$lag.not_good_health <- lag.listw(wts,df$not_good_health)
+df_ngrid_rot$lag.white <- lag.listw(wts,df$white)
+df_ngrid_rot$lag.LONG <- lag.listw(wts,df$LONG)
+df_ngrid_rot$lag.LAT <- lag.listw(wts,df$LAT)
+df_ngrid_rot$lag.con_swing <- lag.listw(wts,df$con_swing)
+```
+
+```{r}
+rfrsar.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT +
+                            lag.con_swing, data=df_ngrid_rot, ntree=1500, 
+                       keep.forest=FALSE, importance=TRUE)
+
+#rfsar.fit
+
+# Get variable importance from the model fit
+ImpData.rfrsar <- as.data.frame(randomForest::importance(rfrsar.fit))
+```
+
+### 13. RFrSDM
+
+```{r}
+
+rfrsdm.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT + 
+                            lag.degree_educated +
+                            lag.english_speaking +
+                            lag.not_good_health +
+                            lag.white + 
+                            lag.LONG +
+                            lag.LAT +
+                            lag.con_swing, 
+                          data=df_ngrid_rot, ntree=1500, keep.forest=FALSE, importance=TRUE)
+
+#rfsdm.fit
+
+# Get variable importance from the model fit
+ImpData.rfrsdm <- as.data.frame(randomForest::importance(rfrsdm.fit))
+
+```
+
+### 14. RFrSLX
+
+```{r}
+
+rfrslx.fit <- randomForest(con_swing ~ 
+                            degree_educated + 
+                            english_speaking + 
+                            not_good_health + 
+                            white + 
+                            LONG + 
+                            LAT + 
+                            lag.degree_educated +
+                            lag.english_speaking +
+                            lag.not_good_health +
+                            lag.white + 
+                            lag.LONG +
+                            lag.LAT, 
+                          data=df_ngrid_rot, ntree=1500, keep.forest=FALSE, importance=TRUE)
+
+#rfslx.fit
+
+# Get variable importance from the model fit
+ImpData.rfrslx <- as.data.frame(randomForest::importance(rfrslx.fit))
+
+```
+
+## Mixed Models
+
+### 15. LMER Mixed model
+
+```{r}
+
+mod_reduced2 <- lmer(con_swing ~ 
+                       degree_educated + 
+                       english_speaking + 
+                       not_good_health + 
+                       white + 
+                       (1|region) +
+                       (degree_educated|region) + 
+                       #(english_speaking|region) + 
+                       (not_good_health|region) +
+                       (white|region),
+                     df)
+
+summary(mod_reduced2)
+aic_mod_reduced2 <- AIC(mod_reduced2)
+
+# ranef(mod_reduced2)
+
+# these coefficients are, as they should be, the same as achieved in 'm3gam' further down
+```
+
+
+### 16. GAM mixed model with smoothing
+
+```{r}
+df |> st_intersects() |> 
+  map_int(~length(.x)) %>% {
+    which(. == 1)} -> temp
+bufs <- rep(0,nrow(df))
+bufs[temp] <- 2000 # just enough to give Isle of Wight neighbours
+nlistconst <- df |> st_buffer(dist=bufs) |> 
+  st_intersects() |> imap(~setdiff(.x,.y))
+names(nlistconst) <- df$constituency_name
+
+m3_gam<- gam(con_swing ~ 
+               degree_educated + 
+               english_speaking + 
+               not_good_health + 
+               white + 
+               s(region, bs="re") + 
+               s(degree_educated,region, bs="re") + 
+               #s(english_speaking,region,  bs="re") + # not signif
+               s(not_good_health,region,  bs="re") + 
+               s(white,region,  bs="re") +
+               s(constituency_name,bs='mrf',xt=list(nb=nlistconst),k=285),
+             data=df, method="REML")
+
+summary(m3_gam)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+results2 <- tibble(
+  indep_vars = c("degree_educated", "english_speaking", "not_good_health", "white","LONG","LAT","lag_degree_educated","lag_english_speaking","lag_not_good_health",
+                 "lag_white","lag_LONG","lag_LAT","lag_Y","rho","lambda","AIC"),
+  OLS = c(coef(regOLS)["degree_educated"],coef(regOLS)["english_speaking"],coef(regOLS)["not_good_health"],coef(regOLS)["white"],coef(regOLS)["LONG"],coef(regOLS)["LAT"],0,0,0,0,0,0,0,0,0,AIC(regOLS)),
+  SAR = c(coef(regSAR)["degree_educated"],coef(regSAR)["english_speaking"],coef(regSAR)["not_good_health"],coef(regSAR)["white"],coef(regSAR)["LONG"],coef(regSAR)["LAT"],0,0,0,0,0,0,0,coef(regSAR)["rho"],0,AIC(regSAR)),
+  SEM = c(coef(regSEM)["degree_educated"],coef(regSEM)["english_speaking"],coef(regSEM)["not_good_health"],coef(regSEM)["white"],coef(regSEM)["LONG"],coef(regSEM)["LAT"],0,0,0,0,0,0,0,0,coef(regSEM)["lambda"],AIC(regSEM)),
+  SDM = c(coef(regSDM)["degree_educated"],coef(regSDM)["english_speaking"],coef(regSDM)["not_good_health"],coef(regSDM)["white"],coef(regSDM)["LONG"],coef(regSDM)["LAT"],coef(regSDM)["lag.degree_educated"],coef(regSDM)["lag.english_speaking"],coef(regSDM)["lag.not_good_health"],coef(regSDM)["lag.white"],coef(regSDM)["lag.LONG"],coef(regSDM)["lag.LAT"],0,coef(regSDM)["rho"],0,AIC(regSDM)),
+  SDEM = c(coef(regSDEM)["degree_educated"],coef(regSDEM)["english_speaking"],coef(regSDEM)["not_good_health"],coef(regSDEM)["white"],coef(regSDEM)["LONG"],coef(regSDEM)["LAT"],coef(regSDEM)["lag.degree_educated"],coef(regSDEM)["lag.english_speaking"],coef(regSDEM)["lag.not_good_health"],coef(regSDEM)["lag.white"],coef(regSDEM)["lag.LONG"],coef(regSDEM)["lag.LAT"],0,0,coef(regSDEM)["lambda"],AIC(regSDEM)),
+  CAR1 = c(coef(regCAR1)["degree_educated"],coef(regCAR1)["english_speaking"],coef(regCAR1)["not_good_health"],coef(regCAR1)["white"],coef(regCAR1)["LONG"],coef(regCAR1)["LAT"],0,0,0,0,0,0,0,0,0,AIC(regCAR1)),
+  LMER = c(fixed.effects(mod_reduced2)[2],fixed.effects(mod_reduced2)[3],fixed.effects(mod_reduced2)[4],fixed.effects(mod_reduced2)[5],0,0,0,0,0,0,0,0,0,0,0,AIC(mod_reduced2)),
+  GAMmixed = c(m3_gam$coefficients[2],m3_gam$coefficients[3],m3_gam$coefficients[4],m3_gam$coefficients[5],0,0,0,0,0,0,0,0,0,0,0,AIC(m3_gam)),
+  RF = c(ImpData.rf[1,1],ImpData.rf[2,1],ImpData.rf[3,1],ImpData.rf[4,1],ImpData.rf[5,1],ImpData.rf[6,1],0,0,0,0,0,0,0,0,0,0),
+  RFSAR = c(ImpData.rfsar[1,1],ImpData.rfsar[2,1],ImpData.rfsar[3,1],ImpData.rfsar[4,1],ImpData.rfsar[5,1],ImpData.rfsar[6,1],0,0,0,0,0,0,ImpData.rfsar[7,1],0,0,0),
+  RFSDM = c(ImpData.rfsdm[1,1],ImpData.rfsdm[2,1],ImpData.rfsdm[3,1],ImpData.rfsdm[4,1],ImpData.rfsdm[5,1],ImpData.rfsdm[6,1],ImpData.rfsdm[7,1],ImpData.rfsdm[8,1],ImpData.rfsdm[9,1],ImpData.rfsdm[10,1],ImpData.rfsdm[11,1],ImpData.rfsdm[12,1],ImpData.rfsdm[13,1],0,0,0),
+  RFSLX =c(ImpData.rfslx[1,1],ImpData.rfslx[2,1],ImpData.rfslx[3,1],ImpData.rfslx[4,1],ImpData.rfslx[5,1],ImpData.rfslx[6,1],ImpData.rfslx[7,1],ImpData.rfslx[8,1],ImpData.rfslx[9,1],ImpData.rfslx[10,1],ImpData.rfslx[11,1],ImpData.rfslx[12,1],0,0,0,0),
+  RFr = c(ImpData.rfr[1,1],ImpData.rfr[2,1],ImpData.rfr[3,1],ImpData.rfr[4,1],ImpData.rfr[5,1],ImpData.rfr[6,1],0,0,0,0,0,0,0,0,0,0),
+  RFrSAR = c(ImpData.rfrsar[1,1],ImpData.rfrsar[2,1],ImpData.rfrsar[3,1],ImpData.rfrsar[4,1],ImpData.rfrsar[5,1],ImpData.rfrsar[6,1],0,0,0,0,0,0,ImpData.rfrsar[7,1],0,0,0),
+  RFrSDM = c(ImpData.rfrsdm[1,1],ImpData.rfrsdm[2,1],ImpData.rfrsdm[3,1],ImpData.rfrsdm[4,1],ImpData.rfrsdm[5,1],ImpData.rfrsdm[6,1],ImpData.rfrsdm[7,1],ImpData.rfrsdm[8,1],ImpData.rfrsdm[9,1],ImpData.rfrsdm[10,1],ImpData.rfrsdm[11,1],ImpData.rfrsdm[12,1],ImpData.rfrsdm[13,1],0,0,0),
+  RFrSLX =c(ImpData.rfrslx[1,1],ImpData.rfrslx[2,1],ImpData.rfrslx[3,1],ImpData.rfrslx[4,1],ImpData.rfrslx[5,1],ImpData.rfrslx[6,1],ImpData.rfrslx[7,1],ImpData.rfrslx[8,1],ImpData.rfrslx[9,1],ImpData.rfrslx[10,1],ImpData.rfrslx[11,1],ImpData.rfrslx[12,1],0,0,0,0)
+)
+
+errors <- tibble(
+  metric = c("R^2",
+             #"Adj R^2",
+             "MSE",
+             "RMSE",
+             "varSE"),
+  OLS = rep(0,4),
+  SAR = rep(0,4),
+  SEM = rep(0,4),
+  SDM = rep(0,4),
+  SDEM = rep(0,4),
+  CAR1 = rep(0,4),
+  #CAR2 = rep(0,4),
+  LMER = rep(0,4),
+  GAMmixed= rep(0,4),
+  RF = rep(0,4),
+  RFSAR = rep(0,4),
+  RFSDM = rep(0,4),
+  RFSLX = rep(0,4),
+  RFr = rep(0,4),
+  RFrSAR = rep(0,4),
+  RFrSDM = rep(0,4),
+  RFrSLX = rep(0,4)
+)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 1. OLS
+
+errors$OLS <- c(1 - (sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/564)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regOLS$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regOLS$fitted.values)^2)),
+                    var((df$con_swing - regOLS$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 2. SAR
+
+errors$SAR <- c(1 - (sum((df$con_swing-regSAR$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/563)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regSAR$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regSAR$fitted.values)^2)),
+                    var((df$con_swing - regSAR$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 3. SEM
+
+errors$SEM <- c(1 - (sum((df$con_swing-regSEM$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/564)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regSEM$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regSEM$fitted.values)^2)),
+                    var((df$con_swing - regSEM$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 4. SDM
+
+errors$SDM <- c(1 - (sum((df$con_swing-regSDM$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/558)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regSDM$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regSDM$fitted.values)^2)),
+                    var((df$con_swing - regSDM$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 5. SDEM
+
+errors$SDEM <- c(1 - (sum((df$con_swing-regSDEM$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/558)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regSDEM$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regSDEM$fitted.values)^2)),
+                    var((df$con_swing - regSDEM$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 6. CAR1
+
+errors$CAR1 <- c(1 - (sum((df$con_swing-regCAR1$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/564)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - regCAR1$fitted.values)^2),
+                    sqrt(mean((df$con_swing - regCAR1$fitted.values)^2)),
+                    var((df$con_swing - regCAR1$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 7. CAR2
+
+# errors$CAR2 <- c(1 - (sum((df$con_swing-regCAR2$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+#                  mean((df$con_swing - regCAR2$fitted.values)^2),
+#                  sqrt(mean((df$con_swing - regCAR2$fitted.values)^2)),
+#                  var((df$con_swing - regCAR2$fitted.values)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 8. RF
+
+errors$RF <- c(1 - (sum((df$con_swing-rf.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/564)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - rf.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rf.fit$predicted)^2)),
+                    var((df$con_swing - rf.fit$predicted)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 9. RFSAR
+
+errors$RFSAR <- c(1 - (sum((df$con_swing-rfsar.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/563)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - rfsar.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfsar.fit$predicted)^2)),
+                    var((df$con_swing - rfsar.fit$predicted)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 10. RFSDM
+
+errors$RFSDM <- c(1 - (sum((df$con_swing-rfsdm.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/557)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - rfsdm.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfsdm.fit$predicted)^2)),
+                    var((df$con_swing - rfsdm.fit$predicted)^2))
+
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 11. RFSLX
+
+errors$RFSLX <- c(1 - (sum((df$con_swing-rfslx.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/558)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - rfslx.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfslx.fit$predicted)^2)),
+                    var((df$con_swing - rfslx.fit$predicted)^2))
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 12. RFr
+
+errors$RFr <- c(1 - (sum((df$con_swing-rfr.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/564)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - rfr.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfr.fit$predicted)^2)),
+                    var((df$con_swing - rfr.fit$predicted)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 13. RFrSAR
+
+errors$RFrSAR <- c(1 - (sum((df$con_swing-rfrsar.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/563)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                mean((df$con_swing - rfrsar.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfrsar.fit$predicted)^2)),
+                    var((df$con_swing - rfrsar.fit$predicted)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 14. RFrSDM
+
+errors$RFrSDM <- c(1 - (sum((df$con_swing-rfrsdm.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/557)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - rfrsdm.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfrsdm.fit$predicted)^2)),
+                    var((df$con_swing - rfrsdm.fit$predicted)^2))
+
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 15. RFrSLX
+
+errors$RFrSLX <- c(1 - (sum((df$con_swing-rfrslx.fit$predicted)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/558)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - rfrslx.fit$predicted)^2),
+                    sqrt(mean((df$con_swing - rfrslx.fit$predicted)^2)),
+                    var((df$con_swing - rfrslx.fit$predicted)^2))
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 16. RFrSDM
+
+errors$LMER <- c(1 - (sum((df$con_swing-fitted(mod_reduced2))^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/557)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - fitted(mod_reduced2))^2),
+                    sqrt(mean((df$con_swing - fitted(mod_reduced2))^2)),
+                    var((df$con_swing - fitted(mod_reduced2))^2))
+
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+### 17. RFrSLX
+
+errors$GAMmixed <- c(1 - (sum((df$con_swing-m3_gam$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                #1 - (570/558)*(sum((df$con_swing-regOLS$fitted.values)^2)/sum((df$con_swing-mean(df$con_swing))^2)),
+                  mean((df$con_swing - m3_gam$fitted.values)^2),
+                    sqrt(mean((df$con_swing - m3_gam$fitted.values)^2)),
+                    var((df$con_swing - m3_gam$fitted.values)^2))
+```
+
+## All results mixed / non-mixed models
+
+```{r, fig.width=12}
+#| code-fold: true
+
+err_res <- rbind(
+  results2 |> rename(vars_metric = indep_vars),
+  errors |> rename(vars_metric = metric)
+  ) |> 
+  mutate(across(where(is.numeric), round, digits=3)) |> 
+  na_if(0) 
+
+options(knitr.kable.NA = "")  
+
+
+
+err_res |>
+  kbl() |> 
+  add_header_above(c(" "=2, "Coefficients"=7,"Permutation importances"=8)) |> 
+  add_header_above(c(" "=2, "'spatialreg' Regressions"=4,"CAR"=1,"Mixed Models"=2,"Random Forests"=4,"Rotated RF"=4)) |> 
+  pack_rows("Indep_Vars (coefficient / variable importance)", 1, 6) |> 
+  pack_rows("Lagged_Vars (coefficient / variable importance)", 7, 13) |> 
+  pack_rows("Spatial_Params", 14, 15) |> 
+  pack_rows("Accuracy", 16, 20) |> 
+  column_spec(10:13, color = "darkgreen") |> 
+  column_spec(14:17, color = "blue") |> 
+  column_spec(7, color = "red") |> 
+  column_spec(8:9, color = "purple") |> 
+  row_spec(17, bold=TRUE) |> 
+  kable_minimal(full_width = T)
+
+```
+
+
+### Mapped residuals
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df$residols <- regOLS$residuals
+r1 <- ggplot(df)+geom_sf(aes(fill=residols), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals OLS")
+
+df$residsar <- regSAR$residuals
+r2 <- ggplot(df)+geom_sf(aes(fill=residsar), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals SAR")
+
+df$residsem <- regSEM$residuals
+r3 <- ggplot(df)+geom_sf(aes(fill=residsem), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals SEM")
+
+df$residsdm <- regSDM$residuals
+r4 <- ggplot(df)+geom_sf(aes(fill=residsdm), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals SDM")
+
+df$residsdem <- regSDEM$residuals
+r5 <- ggplot(df)+geom_sf(aes(fill=residsdem), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals SDEM")
+
+df$residcar1 <- regCAR1$residuals
+r6 <- ggplot(df)+geom_sf(aes(fill=residcar1), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals CAR1")
+
+df$residrf <- df$con_swing - rf.fit$predicted
+r8 <- ggplot(df)+geom_sf(aes(fill=residrf), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RF")
+
+df$residrfsar <- df$con_swing - rfsar.fit$predicted
+r9 <- ggplot(df)+geom_sf(aes(fill=residrfsar), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RFSAR")
+
+df$residrfsdm <- df$con_swing - rfsdm.fit$predicted
+r10 <- ggplot(df)+geom_sf(aes(fill=residrfsdm), lwd=0.05) +
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) +
+  theme_bw() +
+  labs(title = "Residuals RFSDM")
+
+df$residrfslx <- df$con_swing - rfslx.fit$predicted
+r11 <- ggplot(df)+geom_sf(aes(fill=residrfslx), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RFSLX")
+
+df$residrfr <- df$con_swing - rfr.fit$predicted
+r12 <- ggplot(df)+geom_sf(aes(fill=residrfr), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RFr")
+
+df$residrfrsar <- df$con_swing - rfrsar.fit$predicted
+r13 <- ggplot(df)+geom_sf(aes(fill=residrfrsar), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RFrSAR")
+
+df$residrfrsdm <- df$con_swing - rfrsdm.fit$predicted
+r14 <- ggplot(df)+geom_sf(aes(fill=residrfrsdm), lwd=0.05) +
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) +
+  theme_bw() +
+  labs(title = "Residuals RFrSDM")
+
+df$residrfrslx <- df$con_swing - rfrslx.fit$predicted
+r15 <- ggplot(df)+geom_sf(aes(fill=residrfrslx), lwd=0.05) + 
+  scale_fill_gradient2(low="red",high="blue",mid="white",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals RFrSLX")
+```
+
+
+```{r}
+
+resids_together <- ggarrange(r1, r2, r3, r4, r5, 
+                             r6, NULL, NULL, NULL, NULL, 
+                             r8, r9, r10, r11, NULL, 
+                             r12, r13, r14, r15, NULL,
+                             nrow=4, ncol=5, common.legend = TRUE, legend="bottom")
+
+```
+
+```{r, fig.width=12, fig.height=12}
+
+resids_together
+
+```
+
+
+
+
+
+
+
+
+## Geographic RF
+
+```{r}
+
+Coords <- df |> 
+  select(LONG,LAT) |> 
+  st_drop_geometry() |> 
+  as.matrix()
+
+df.grf <- df |> 
+  select(con_swing, degree_educated, english_speaking, not_good_health, white) |> 
+  st_drop_geometry()
+
+bwe <-grf.bw(con_swing ~ 
+               degree_educated + 
+               english_speaking + 
+               not_good_health + 
+               white,
+             df.grf, kernel="adaptive",
+             coords=Coords, bw.min = 20, bw.max = 100, step = 10,
+             forests = FALSE, weighted = TRUE)
+
+grf <- grf(con_swing ~ 
+               degree_educated + 
+               english_speaking + 
+               not_good_health + 
+               white, 
+           dframe=df.grf, bw=bwe$Best.BW,
+           kernel="adaptive", coords=Coords,
+           forests = TRUE, weighted = TRUE)
+
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+
+df$rflocalimp_degree_educated <- grf$Local.Variable.Importance$degree_educated
+df$rflocalimp_english_speaking <- grf$Local.Variable.Importance$english_speaking
+df$rflocalimp_not_good_health <- grf$Local.Variable.Importance$not_good_health
+df$rflocalimp_white <- grf$Local.Variable.Importance$white
+
+grfp1 <- ggplot(df) + 
+  geom_sf(aes(fill=rflocalimp_degree_educated), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") + 
+  labs(title = "degree_educated",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp2 <- ggplot(df) + 
+  geom_sf(aes(fill=rflocalimp_english_speaking), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "english_speaking",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp3 <- ggplot(df) + 
+  geom_sf(aes(fill=rflocalimp_not_good_health), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "not_good_health",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp4 <- ggplot(df) + 
+  geom_sf(aes(fill=rflocalimp_white), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "white",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grf_varimp_plots <- ggarrange(grfp1, grfp2, grfp3, grfp4, 
+          nrow = 1, ncol = 4, legend = "bottom", common.legend = TRUE)
+
+###
+
+grfp1lon <- ggplot(df |> filter(region == "London")) +
+  geom_sf(aes(fill=rflocalimp_degree_educated), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") + 
+  labs(title = "degree_educated",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp2lon <- ggplot(df |> filter(region == "London")) +
+  geom_sf(aes(fill=rflocalimp_english_speaking), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "english_speaking",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp3lon <- ggplot(df |> filter(region == "London")) +
+  geom_sf(aes(fill=rflocalimp_not_good_health), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "not_good_health",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grfp4lon <- ggplot(df |> filter(region == "London")) +
+  geom_sf(aes(fill=rflocalimp_white), lwd=0.05) + 
+  scale_fill_viridis(limits=c(0,370), direction = -1,option = "E") +
+  labs(title = "white",
+       subtitle = "Variable importance",
+       fill="") + 
+  theme_bw()
+
+grf_varimp_plotslon <- ggarrange(grfp1lon, grfp2lon, grfp3lon, grfp4lon, 
+          nrow = 1, ncol = 4, legend = "bottom", common.legend = TRUE)
+```
+
+```{r, fig.width=10, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+
+grf_varimp_plots
+
+```
+
+
+```{r, fig.width=10, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+grf_varimp_plotslon
+
+```
+
+```{r}
+testdf <- df.grf |> 
+  mutate(X=df$LONG,
+         Y=df$LAT)
+
+grf$Global.Model$prediction.error
+```
+

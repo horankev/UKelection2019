@@ -1,0 +1,2067 @@
+---
+title: "2: Spatially varying explanations behind the Conservative to Labour swing in 2019"
+toc: true
+format: html
+editor: source
+---
+
+see: 
+
+[Spatially varying explanations behind the UK's vote to leave the EU](https://huckg.is/gisruk2017/GISRUK_2017_paper_75.pdf) 
+*Roger Beecham, Aidan Slingsby, Chris Brunsdon and Rob Radburn,  January 19, 2017*
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+packages <- c(
+  "MASS",
+  "tidyverse",
+  "sf",
+  "tmap",
+  "here",
+  "spdep", # areal data
+  "grid",
+  "GWmodel",
+  "kableExtra",
+  "cowplot",
+  "parlitools",
+  "corrplot",
+  "lme4",
+  "mgcv",
+  "ggfortify",
+  "ggforce", # has geom_circle
+  "gridExtra",
+  "car",
+  "rgeoda", # for LISA
+  "ggpubr",
+  "ggrepel",
+  "ggpointdensity",
+  "ggalt", # for geom_encircle
+  "ggsflabel", # has repel labels for sf
+  "viridis",
+  "spatialreg",
+  "rgdal",
+  "rgeos",
+  "randomForest",
+  "broom",
+  "patchwork"
+  )
+
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+tmap_mode("plot")
+rm(list=ls())
+```
+
+```{r, echo=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# avoid conflict with dplyr and MASS::select
+select <- dplyr::select
+
+set.seed(123)
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df <- readRDS(here("df_withtext.rds")) |> 
+  mutate(degree_educated = degree,
+         professionals = industry_professional,
+         younger_adults = age_18_to_19 + age_20_to_24 + age_25_to_29 + age_30_to_44,
+         english_speaking = english_all,
+         single_ethnicity_household = 100 - ethnicity_mixed,
+         not_good_health = health_fair + health_bad + health_very_bad,
+         white = ethnicity_white,
+         christian = christian,
+         own_home = house_owned,
+         no_car = cars_none,
+         density = density)
+
+hex <- west_hex_map
+df_hex <- df |> 
+  st_drop_geometry() |> 
+  inner_join(hex |> select(-"constituency_name"), #  no letter case confusion
+             by = c("ons_const_id"="gss_code")) |> 
+  st_as_sf()
+
+hex_regions <- df_hex |> 
+  group_by(region) |> 
+  summarise() |> 
+  st_as_sf()
+
+regions <- df |> group_by(region) |> 
+  summarise() |> 
+  st_as_sf()
+
+vardf <- data.frame(variable = c("degree_educated",
+               "professionals",
+               "younger_adults",
+               "english_speaking",
+               "single_ethnicity_household",
+               "not_good_health",
+               "white",
+               "christian",
+               "own_home",
+               "no_car"))
+
+var_justification <- data.frame(
+  variable = c("degree_educated",
+               "professionals",
+               "younger_adults",
+               "english_speaking",
+               "single_ethnicity_household",
+               "not_good_health",
+               "white",
+               "christian",
+               "own_home",
+               "no_car"),
+  justification = c(rep("post-industrial / knowledge economy",3),
+                    rep("diversity / values / outcomes",5),
+                    rep("metropolitan / 'big city'",2)),
+  jcolour = c(rep("navyblue",3),
+                    rep("firebrick4",5),
+                    rep("darkgreen",2))
+)
+
+```
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+swing_map <- ggplot(df) + 
+  geom_sf(aes(fill=con_swing), lwd=0.1) + 
+  coord_sf(datum=NA) + 
+  scale_fill_distiller(palette = "BrBG") + 
+  theme_bw() 
+
+region_map <- ggplot(regions) + 
+  geom_sf(aes(fill=region), lwd=0.1) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set3") + 
+  theme_bw() 
+
+swing_hex <- ggplot(df_hex) + 
+  geom_sf(aes(fill=con_swing), lwd=0.1) + 
+  coord_sf(datum=NA) + 
+  scale_fill_distiller(palette = "BrBG") + 
+  theme_bw()
+
+region_hex <- ggplot() + 
+  geom_sf(data=df_hex, aes(fill=region), lwd=0.1) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set3") + 
+  theme_bw()
+
+swing_maps <- ggarrange(swing_map,region_map,swing_hex,region_hex, 
+                        ncol = 4, common.legend = TRUE, legend = "left")
+```
+
+```{r, fig.width=10, fig.height=5}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+swing_maps
+
+```
+
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+kbl(var_justification[,1:2]) |> 
+  kable_classic(full_width = F, html_font = "Cambria") |> 
+  row_spec(1:3, color = "blue") |> 
+  row_spec(4:8, color = "darkred") |> 
+  row_spec(9:10, color = "darkgreen")
+
+```
+
+
+## Global Associations
+
+### Univariate x10 global models
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+cors_df <- data.frame(
+  variable = c(
+    "degree_educated",
+    "professionals",
+    "younger_adults",
+    "english_speaking",
+    "single_ethnicity_household",
+    "not_good_health",
+    "white",
+    "christian",
+    "own_home",
+    "no_car"
+  ),
+  justification = factor(c(rep("post-industrial / knowledge economy",3),
+                    rep("diversity / values / outcomes",5),
+                    rep("metropolitan / 'big city'",2))), 
+  jcolour = c(rep("navyblue",3),
+                    rep("firebrick4",5),
+                    rep("darkgreen",2)),
+  AIC = c(
+    AIC(lm(con_swing~degree_educated+region, data=df)),
+    AIC(lm(con_swing~professionals+region, data=df)),
+    AIC(lm(con_swing~younger_adults+region, data=df)),
+    AIC(lm(con_swing~english_speaking+region, data=df)),
+    AIC(lm(con_swing~single_ethnicity_household+region, data=df)),
+    AIC(lm(con_swing~not_good_health+region, data=df)),
+    AIC(lm(con_swing~white+region, data=df)),
+    AIC(lm(con_swing~christian+region, data=df)),
+    AIC(lm(con_swing~own_home+region, data=df)),
+    AIC(lm(con_swing~no_car+region, data=df))
+    ) |> 
+    round(2),
+  corr = c(
+    cor(df$con_swing, df$degree_educated),
+    cor(df$con_swing, df$professionals),
+    cor(df$con_swing, df$younger_adults),
+    cor(df$con_swing, df$english_speaking),
+    cor(df$con_swing, df$single_ethnicity_household),
+    cor(df$con_swing, df$not_good_health),
+    cor(df$con_swing, df$white),
+    cor(df$con_swing, df$christian),
+    cor(df$con_swing, df$own_home),
+    cor(df$con_swing, df$no_car)
+  ) |>
+    round(2)
+) |> arrange(desc(abs(corr)))
+  
+
+plot_list1 <- list()
+i=1
+for (var in cors_df$variable){
+   
+  plot_list1[[i]] <-  ggplot(df) + 
+    geom_point(aes_string(x=var, y="con_swing", fill="region", size="population"), shape=21) + 
+    geom_smooth(aes_string(x=var, y="con_swing"), colour="black", lwd=2, method = "lm", se = TRUE) +
+    labs(title = cors_df$variable[i],
+         subtitle = paste0("Correlation: ",cors_df[i,5],"\n",cors_df[i,2])) + 
+    scale_fill_brewer(palette = "Paired") + 
+    scale_size_continuous(range = c(0.5,4)) + 
+    guides(size="none") +
+    theme_bw() + 
+    theme(plot.subtitle = element_text(colour=cors_df[i,3])) + 
+    theme(plot.subtitle = element_text(size=10))
+  i = i+1
+}
+
+cor_plots1 <- ggarrange(plot_list1[[1]],plot_list1[[2]],plot_list1[[3]],plot_list1[[4]],plot_list1[[5]],
+                       plot_list1[[6]],plot_list1[[7]],plot_list1[[8]],plot_list1[[9]],plot_list1[[10]],
+                       nrow = 3, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+```
+
+```{r, fig.width=12, fig.height=12, message=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Scatterplots of Butler swing to Conservatives by candidate explanatory variable"), 
+                         scriptstyle("Annotated with global correlation and category of variable")))
+annotate_figure(cor_plots1,
+                top=text_grob(title))
+
+```
+
+
+## Spatial dependence
+
+### Geographic context as grouped nuisance term
+
+A common approach to treating geographic dependence in the values of variables is to model geographic context as a Fixed Effect (FE).
+
+using `lm(con_swing ~ region + individual_variable -1)`
+
+
+#### Model with FE grouping variable
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# scale the variables to better judge relative strength of effects
+df_scaled <- df |> 
+  st_drop_geometry() |> 
+  select(degree_educated,
+    professionals,
+    younger_adults,
+    english_speaking,
+    single_ethnicity_household,
+    not_good_health,
+    white,
+    christian,
+    own_home,
+    no_car) |> 
+  scale() |> 
+  as.data.frame() |> 
+  mutate(con_swing=df$con_swing,
+         region=df$region)
+
+fitlistfe <- list()
+for (i in 1:10){
+  formula    <- as.formula(paste("con_swing ~ region + ", vardf$variable[i],"-1"))
+  fitlistfe[[i]] <- lm(formula, data = df_scaled)
+}
+
+rglistfe <- list()
+for (i in 1:10){
+  rglistfe[[i]] <- fitted(fitlistfe[[i]])
+  
+}
+
+res_listfe <- list()
+for(i in 1:10){
+  res_listfe$fitted[[i]] <- rglistfe[[i]]
+  res_listfe$var[[i]] <- df_scaled[,i]
+}
+
+pl_listfe <- list()
+for (i in 1:10){
+  df_scaled_temp <- df_scaled
+  df_scaled_temp$fit <- res_listfe$fitted[[i]]
+  df_scaled_temp$var <- res_listfe$var[[i]]
+  pl_listfe[[i]] <- ggplot(df_scaled_temp) + 
+    geom_point(aes(x=var,y=con_swing, colour=region),alpha=0.1) + 
+    geom_line(aes(x=var,y=fit,group=region,colour=region),lwd=1.5) +
+    labs(x="z-score", 
+         title = cors_df$variable[i],
+         subtitle = paste0(
+           "AIC: ",round(AIC(fitlistfe[[i]]),2),"\ncoef: ",round(fitlistfe[[i]]$coefficients[11],2),"\n")
+         ) + 
+    scale_colour_brewer(palette = "Paired") + 
+    scale_size_continuous(range = c(0.5,4)) + 
+    guides(size="none") + 
+    xlim(-5,5) + 
+    theme_bw() + 
+    theme(plot.subtitle = element_text(colour=cors_df[i,3])) + 
+    theme(plot.subtitle = element_text(size=10))
+}
+
+
+fe_plots <- ggarrange(pl_listfe[[1]],pl_listfe[[2]],pl_listfe[[3]],pl_listfe[[4]],pl_listfe[[5]],
+                       pl_listfe[[6]],pl_listfe[[7]],pl_listfe[[8]],pl_listfe[[9]],pl_listfe[[10]],
+                       nrow = 3, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+```
+
+
+
+```{r, fig.width=12, fig.height=12, message=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Scatterplots of Butler swing to Conservatives by candidate explanatory variable"), 
+                         scriptstyle("Constituencies of England and Wales. Annotated with AIC and 'virtual' FE lines on region")))
+annotate_figure(fe_plots,
+                top=text_grob(title))
+
+```
+
+## Spatial heterogeneity
+
+### Include interaction on region
+
+using `lm(con_swing ~ individual_variable : region)`
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+fitlistint <- list()
+for (i in 1:10){
+  formula    <- as.formula(paste("con_swing ~ region + ", vardf$variable[i],":region"))
+  fitlistint[[i]] <- lm(formula, data = df_scaled)
+}
+
+rglistint <- list()
+for (i in 1:10){
+  rglistint[[i]] <- fitted(fitlistint[[i]])
+  
+}
+
+res_listint <- list()
+for(i in 1:10){
+  res_listint$fitted[[i]] <- rglistint[[i]]
+  res_listint$var[[i]] <- df_scaled[,i]
+}
+
+pl_listint <- list()
+for (i in 1:10){
+  df_scaled_temp <- df_scaled
+  df_scaled_temp$fit <- res_listint$fitted[[i]]
+  df_scaled_temp$var <- res_listint$var[[i]]
+  pl_listint[[i]] <- ggplot(df_scaled_temp) + 
+    geom_point(aes(x=var,y=con_swing, colour=region),alpha=0.1) + 
+    geom_line(aes(x=var,y=fit,group=region,colour=region),lwd=1.5) +
+    labs(x="z-score", 
+         title = cors_df$variable[i],
+         subtitle = paste0(
+           "AIC: ",round(AIC(fitlistint[[i]]),2),"\ncoef: ",cors_df[i,2])
+         ) + 
+    scale_colour_brewer(palette = "Paired") + 
+    scale_size_continuous(range = c(0.5,4)) + 
+    guides(size="none") + 
+    xlim(-5,5) + 
+    theme_bw() + 
+    theme(plot.subtitle = element_text(colour=cors_df[i,3])) + 
+    theme(plot.subtitle = element_text(size=10))
+}
+
+
+int_plots <- ggarrange(pl_listint[[1]],pl_listint[[2]],pl_listint[[3]],pl_listint[[4]],pl_listint[[5]],
+                       pl_listint[[6]],pl_listint[[7]],pl_listint[[8]],pl_listint[[9]],pl_listint[[10]],
+                       nrow = 3, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+```
+
+
+
+```{r, fig.width=12, fig.height=12, message=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Scatterplots of Butler swing to Conservatives by candidate explanatory variable"), 
+                         scriptstyle("Constituencies of England and Wales. Annotated with AIC and FE lines with region as interaction term")))
+annotate_figure(int_plots,
+                top=text_grob(title))
+
+```
+
+
+## Random intercepts
+
+```{r, fig.width=12,fig.height=10}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+library(MuMIn) # for extracting pseudo r2
+
+fitlistvi <- list()
+for (i in 1:10){
+  formula    <- as.formula(paste("con_swing ~", vardf$variable[i],"+(1|region)"))
+  fitlistvi[[i]] <- lmer(formula, data = df_scaled)
+}
+
+rglistvi <- list()
+for (i in 1:10){
+  rglistvi[[i]] <- fitted(fitlistvi[[i]])
+  
+}
+
+res_listvi <- list()
+for(i in 1:10){
+  res_listvi$fitted[[i]] <- rglistvi[[i]]
+  res_listvi$var[[i]] <- df_scaled[,i]
+}
+
+pl_listvi <- list()
+for (i in 1:10){
+  df_scaled_temp <- df_scaled
+  df_scaled_temp$fit <- res_listvi$fitted[[i]]
+  df_scaled_temp$var <- res_listvi$var[[i]]
+  pl_listvi[[i]] <- ggplot(df_scaled_temp) + 
+    geom_point(aes(x=var,y=con_swing, colour=region),alpha=0.1) + 
+    geom_line(aes(x=var,y=fit,group=region,colour=region),lwd=1.5) +
+    labs(x="z-score", 
+         title = cors_df$variable[i],
+         subtitle = paste0("pseudo-R2:\nmarginal: ",round(r.squaredGLMM(fitlistvi[[i]])[1],2),"\n",
+                           "conditional: ",round(r.squaredGLMM(fitlistvi[[i]])[2],2),"\n",
+                           cors_df[i,2])) + 
+    scale_colour_brewer(palette = "Paired") + 
+    scale_size_continuous(range = c(0.5,4)) + 
+    guides(size="none") +
+    theme_bw() + 
+    theme(plot.subtitle = element_text(colour=cors_df[i,3])) + 
+    theme(plot.subtitle = element_text(size=10))
+}
+
+
+vi_plots <- ggarrange(pl_listvi[[1]],pl_listvi[[2]],pl_listvi[[3]],pl_listvi[[4]],pl_listvi[[5]],
+                       pl_listvi[[6]],pl_listvi[[7]],pl_listvi[[8]],pl_listvi[[9]],pl_listvi[[10]],
+                       nrow = 3, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+
+
+```
+
+
+
+```{r, fig.width=12, fig.height=12, message=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Varying intercept models fit for each explanatory variable")))
+annotate_figure(vi_plots,
+                top=text_grob(title))
+```
+
+
+marginal R^2: proportion of variance explained by the fixed (non-regional) factors alone 
+
+conditional R^2: proportion of variance explained by both the fixed and random (varying intercept) factors 
+
+
+## Random slopes
+
+```{r, fig.width=12,fig.height=10}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+library(MuMIn)
+
+fitlistvs <- list()
+for (i in 1:10){
+  formula    <- as.formula(paste("con_swing ~", vardf$variable[i],"+1+(",vardf$variable[i],"|region)"))
+  fitlistvs[[i]] <- lmer(formula, data = df_scaled)
+}
+
+rglistvs <- list()
+for (i in 1:10){
+  rglistvs[[i]] <- fitted(fitlistvs[[i]])
+  
+}
+
+res_listvs <- list()
+for(i in 1:10){
+  res_listvs$fitted[[i]] <- rglistvs[[i]]
+  res_listvs$var[[i]] <- df_scaled[,i]
+}
+
+pl_listvs <- list()
+for (i in 1:10){
+  liketest <- anova(fitlistvi[[i]],fitlistvs[[i]])$`Pr(>Chisq)`[2] |> 
+    round(2)
+  extract_corr <- as.data.frame(VarCorr(fitlistvs[[i]]))$sdcor[3] |> 
+    round(2)
+  df_scaled_temp <- df_scaled
+  df_scaled_temp$fit <- res_listvs$fitted[[i]]
+  df_scaled_temp$var <- res_listvs$var[[i]]
+  pl_listvs[[i]] <- ggplot(df_scaled_temp) + 
+    geom_point(aes(x=var,y=con_swing, colour=region),alpha=0.1) + 
+    geom_line(aes(x=var,y=fit,group=region,colour=region),lwd=1.5) +
+    labs(x="z-score", 
+         title = cors_df$variable[i],
+         subtitle = paste0("pseudo-R2:\nmarginal: ",round(r.squaredGLMM(fitlistvs[[i]])[1],2),"\n",
+                           "conditional: ",round(r.squaredGLMM(fitlistvs[[i]])[2],2),"\n",
+                           "like/ratio pval: ",liketest,"\n",
+                           "corr: ", extract_corr,"\n",
+                           cors_df[i,2])) + 
+    scale_colour_brewer(palette = "Paired") + 
+    scale_size_continuous(range = c(0.5,4)) + 
+    guides(size="none") +
+    theme_bw() + 
+    theme(plot.subtitle = element_text(colour=cors_df[i,3])) + 
+    theme(plot.subtitle = element_text(size=10))
+}
+
+
+vsplots <- ggarrange(pl_listvs[[1]],pl_listvs[[2]],pl_listvs[[3]],pl_listvs[[4]],pl_listvs[[5]],
+                       pl_listvs[[6]],pl_listvs[[7]],pl_listvs[[8]],pl_listvs[[9]],pl_listvs[[10]],
+                       nrow = 3, ncol = 4, common.legend = TRUE, legend = "bottom")
+
+```
+
+
+
+```{r, fig.width=12, fig.height=12, message=FALSE}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Varying slopes models fit for each explanatory varible")))
+annotate_figure(vsplots,
+                top=text_grob(title))
+```
+
+- marginal R^2: proportion of variance explained by the fixed (non-regional) factors alone 
+
+- conditional R^2: proportion of variance explained by both the fixed and random (varying slope) factors 
+
+- likelihood ratio test statistic comparing the varying slope and the varying intercept models
+
+- correlation values between slopes and intercepts in the slope models 
+
+
+## GW summary statistics
+
+Geographically-weighted (GW) statistics provides a mechanism for exploring the extent to which values and associations vary continuously over space (Brunsdon, Fortheringham, and Charlton 2002). This involves generating local statistics, and in the case of Geographically Weighted Regression (GWR) local regression coefficients, for each spatial unit. If applied to our dataset, separate regression coefficients for each constituency are estimated that take into account observed values for Butler sswing and the demographic variables in nearby constituencies. GW-statistics enables spatial non-stationarity in process to be flexibly explored and characterised.
+
+
+```{r, fig.width=6, fig.height=6, include=FALSE}
+
+#| code-fold: true
+#| message: false
+#| warning: false
+#| echo: false
+
+# using GWModel
+
+df.spdf <- df_scaled |> 
+  select(-region) |> 
+  mutate(geometry = df$geometry) |> 
+  st_as_sf() |> 
+  st_set_crs("WGS84") |> 
+  mutate(centroid = st_centroid(geometry)) |>
+  st_drop_geometry() |>
+  st_as_sf() |>
+  as_Spatial()
+
+localstats1 <- gwss(df.spdf,
+                    vars=c("con_swing", "degree_educated", "professionals", "younger_adults", "english_speaking", 
+          "single_ethnicity_household", "not_good_health", "white", "christian", "own_home", 
+          "no_car"),
+                    kernel = "boxcar", adaptive = TRUE, bw = 300, quantile = TRUE)
+
+gw_corr <- localstats1$SDF |> 
+  as.data.frame() |> 
+  select(starts_with("Corr")) |> 
+  mutate(geometry = df$geometry) |> 
+  st_as_sf()
+
+temp <- localstats1$SDF |> 
+  as.data.frame() |> 
+  select(Corr_con_swing.degree_educated,
+         Corr_con_swing.professionals,
+         Corr_con_swing.younger_adults,
+         Corr_con_swing.english_speaking,
+         Corr_con_swing.single_ethnicity_household,
+         Corr_con_swing.not_good_health,
+         Corr_con_swing.white,
+         Corr_con_swing.christian,
+         Corr_con_swing.own_home,
+         Corr_con_swing.no_car
+         ) |> 
+  mutate(geometry = df$geometry) |> 
+  st_as_sf()
+
+temp_hex <- localstats1$SDF |> 
+  as.data.frame() |> 
+  select(Corr_con_swing.degree_educated,
+         Corr_con_swing.professionals,
+         Corr_con_swing.younger_adults,
+         Corr_con_swing.english_speaking,
+         Corr_con_swing.single_ethnicity_household,
+         Corr_con_swing.not_good_health,
+         Corr_con_swing.white,
+         Corr_con_swing.christian,
+         Corr_con_swing.own_home,
+         Corr_con_swing.no_car
+         ) |> 
+  mutate(geometry = df_hex$geometry) |> 
+  st_as_sf()
+
+plot_list2 <- list()
+i=1
+vars2 <- names(temp)
+for (var in vars2){
+   
+  plot_list2[[i]] <-  ggplot() + 
+  geom_sf(data=temp_hex, aes_string(fill=var), lwd=0.01) + 
+  coord_sf(datum=NA) + 
+  scale_fill_distiller(palette = "RdYlBu", 
+                       labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'),
+                       limits = c(-0.8,0.8),
+                       direction=1) + 
+  theme_bw() + 
+    theme(legend.title = element_blank(),
+          legend.key.height = unit(0.1, 'cm'),
+          legend.key.width = unit(0.6, 'cm')) +
+    labs(title = str_remove(vars2[i],"Corr_con_swing."))
+  i = i+1
+}
+
+cor_plots2 <- ggarrange(plot_list2[[1]],plot_list2[[2]],plot_list2[[3]],plot_list2[[4]],plot_list2[[5]],
+                       plot_list2[[6]],plot_list2[[7]],plot_list2[[8]],plot_list2[[9]],plot_list2[[10]],
+                       nrow = 3, ncol = 4, legend = "bottom")
+
+```
+
+
+```{r, fig.width=8, fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+title <- expression(atop(bold("Geographically-weighted correlation coefficients "), 
+                         scriptstyle("for candidate explanatory variables against share of Butler swing")))
+annotate_figure(cor_plots2,
+                top=text_grob(title))
+
+```
+
+`degree-educated` and `professionals` might be regarded as “global” predictors; negative across England and Wales. 
+
+`not_good_health` is positively associated with swing; particularly so towards in the East Midlands and East. 
+
+`younger_adults`, `own_home` and `no_car` show a clear North/South divide as expressed by a line running roughly from the Bristol Channel to the Wash.
+
+`english_speaking`, `white`, `christian` and `single_ethnicity_household` share this North/South divide, but also incorporate a further visible subdivision which separates much of the South West and South Wales from the aforementioned diagonal North/South line.
+
+
+#### Make 4 clusters based on GW local correlation coefficients between 10 variables and Butler swing
+
+```{r, fig.width=4, fig.height=4}
+#| code-fold: true
+#| message: false
+#| warning: false
+#| echo: false
+
+temp_nogeo4 <- gw_corr[,1:10] |> 
+  st_drop_geometry()
+
+#factoextra::fviz_nbclust(temp_nogeo,kmeans) # show optimal clusters
+
+cluster.fit <- kmeans(temp_nogeo4,4, nstart = 100)
+
+temp_nogeo4$cluster <- factor(cluster.fit$cluster)
+
+temp_nogeo4 <- temp_nogeo4 |> 
+  mutate(geometry = df$geometry) |> 
+  st_as_sf()
+
+x1 <- ggplot(temp_nogeo4) + geom_density(aes(x=Corr_con_swing.degree_educated, fill=cluster)) + facet_wrap(~cluster, ncol = 1) + 
+  theme(legend.title = element_blank()) + 
+  theme_bw() + 
+  labs(x="degree") + 
+  theme(axis.title.x = element_text(colour="navyblue")) + 
+  theme(strip.background =element_rect(fill="navyblue")) +
+  theme(strip.text = element_text(colour = 'white')) + 
+  scale_fill_brewer(palette = "Set2") + 
+  scale_x_continuous(position = "top",
+                     labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'))
+  
+x2 <- ggplot(temp_nogeo4) + geom_density(aes(x=Corr_con_swing.younger_adults, fill=cluster)) + facet_wrap(~cluster, ncol = 1) + 
+  theme(legend.title = element_blank()) + 
+  theme_bw() +  
+  theme(axis.title.x = element_text(colour="navyblue")) + 
+  theme(strip.background =element_rect(fill="navyblue")) +
+  theme(strip.text = element_text(colour = 'white')) + 
+  labs(x="younger_adults") + 
+  scale_fill_brewer(palette = "Set2") + 
+  scale_x_continuous(position = "top",
+                     labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'))
+
+x3 <- ggplot(temp_nogeo4) + geom_density(aes(x=Corr_con_swing.not_good_health, fill=cluster)) + facet_wrap(~cluster, ncol = 1) + 
+  theme(legend.title = element_blank()) + 
+  theme_bw() + 
+  theme(axis.title.x = element_text(colour="firebrick4")) + 
+  theme(strip.background =element_rect(fill="firebrick4")) +
+  theme(strip.text = element_text(colour = 'white')) + 
+  labs(x="badhealth") + 
+  scale_fill_brewer(palette = "Set2") + 
+  scale_x_continuous(position = "top",
+                     labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'))
+
+x4 <- ggplot(temp_nogeo4) + geom_density(aes(x=Corr_con_swing.white, fill=cluster)) + facet_wrap(~cluster, ncol = 1) + 
+  theme(legend.title = element_blank()) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(vjust = 1, hjust=1)) + 
+  theme(axis.title.x = element_text(colour="firebrick4")) + 
+  theme(strip.background =element_rect(fill="firebrick4")) +
+  theme(strip.text = element_text(colour = 'white')) + 
+  labs(x="white") + 
+  scale_fill_brewer(palette = "Set2") + 
+  scale_x_continuous(position = "top",
+                     labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'))
+
+x5 <- ggplot(temp_nogeo4) + geom_density(aes(x=Corr_con_swing.no_car, fill=cluster)) + facet_wrap(~cluster, ncol = 1) + 
+  theme(legend.title = element_blank()) + 
+  theme_bw() + 
+  theme(axis.title.x = element_text(colour="darkgreen")) + 
+  theme(strip.background =element_rect(fill="darkgreen")) +
+  theme(strip.text = element_text(colour = 'white')) + 
+  labs(x="no_car") + 
+  scale_fill_brewer(palette = "Set2") + 
+  scale_x_continuous(position = "top",
+                     labels = scales::number_format(accuracy = 0.1,
+                                 decimal.mark = '.'))
+
+```
+
+
+
+```{r}
+#| code-fold: true
+#| message: false
+#| warning: false
+#| echo: false
+
+cluster4_map <- ggplot() + 
+  geom_sf(data=temp_nogeo4, aes(fill=cluster), lwd=0.01) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set2") + 
+  geom_sf(data=regions, fill=NA) + 
+  coord_sf(datum=NA) + 
+  guides(fill=FALSE) +
+  labs(title = "Clusters x4",
+       subtitle = "based on GW correlation of 10 variables\nwith Butler swing") + 
+  theme_bw() + 
+  theme(plot.subtitle = element_text(size=9))
+
+plot <- ggarrange(x1,x2,x3,x4,x5,cluster4_map,nrow=1,common.legend = TRUE,legend = "right")
+plot2 <- annotate_figure(plot, top = text_grob("GW correlation coefficient between con_swing and 5 variables", 
+               color = "black", face = "bold", size = 14),
+               bottom = text_grob("GW-correlation coefficient", 
+               color = "black", face = "bold", size = 12),
+               left = "Clustered group")
+
+```
+
+
+Show variation in correlations between 5 variables used in reduced model and Butler swing across the 4 clusters identified by correlations across all 10 variables and Butler swing.
+
+```{r, fig.width=12, fig.height==12}
+#| code-fold: true
+#| message: false
+#| warning: false
+#| echo: false
+
+plot2
+
+```
+
+
+```{r, fig.width=12}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+gw_corr_groups <- data.frame(
+  cluster = seq_along(1:4),
+  degree = c("low","mid","high","mid"),
+  younger_adults = c("low","high","mid","high"),
+  bad_health = c("high","low","low","low"),
+  white = c("high","low","mid","mid"),
+  no_car = c("low","high","low","high"),
+  regions = c("East Midlands, East",
+                       "South West, South Wales",
+                       "London, South East, South West",
+                       "North East, North West, Yorkshire and the Humber, West Midlands, East Midlands, North Wales"
+                       )
+)
+
+gw_corr_groups |>
+  kbl() |> 
+  add_header_above(c(" "=1, "post_industrial/\nknowledge"=2,"diversity/values/\noutcomes"=2,"metropolitan/\nbig_city"=1," "=1)) |> 
+  add_header_above(c("Variable Categories"=6,"Contained Regions"=1)) |> 
+  column_spec(2:3, color = "blue") |> 
+  column_spec(4:5, color = "darkred") |> 
+  column_spec(6, color = "darkgreen") |>
+  column_spec(2, border_left = TRUE) |> 
+  column_spec(4, border_left = TRUE) |> 
+  column_spec(6, border_left = TRUE) |> 
+  column_spec(7, border_left = TRUE) |> 
+  kable_paper("hover", full_width = TRUE)
+  #kable_paper(full_width = T)
+```
+
+
+## Models
+
+### Multivariate (x10) global model (all England & Wales)
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+reg1 <- lm(con_swing ~ degree_educated + 
+          professionals + 
+          younger_adults + 
+          english_speaking + 
+          single_ethnicity_household + 
+          not_good_health + 
+          white + 
+          christian + 
+          own_home + 
+          no_car, df_scaled)
+summary(reg1)
+
+tidy1 <- tidy(reg1)[-1,] |> 
+  inner_join(var_justification, by=c("term"="variable")) |> 
+  mutate(term = fct_reorder(term, estimate, .desc=TRUE))
+
+glance1 <- glance(reg1)
+
+ggplot(tidy1, aes(x=estimate, y=term,
+                 xmin=estimate - qnorm(0.975)*std.error,
+                 xmax=estimate + qnorm(0.975)*std.error,
+                 colour=jcolour)) + 
+  scale_colour_identity() + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", fill="white", shape=21, size=3) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  labs(x="coefficient effect", 
+       y=NULL, 
+       title = "Output from multivariate model",
+       subtitle = paste0("Butler swing to Conservatives by 10 demographic composition variables. \nAdjusted R^2: ",
+                         round(glance1$adj.r.squared,2)))
+
+```
+
+
+### Multivariate (x10) models by region
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+reg_list <- list()
+tidy_list <- list()
+glance_list <- list()
+i=1
+
+for (var in levels(df_scaled$region)){
+  reg_list[[i]] <- lm(con_swing ~ degree_educated + 
+          professionals + 
+          younger_adults + 
+          english_speaking + 
+          single_ethnicity_household + 
+          not_good_health + 
+          white + 
+          christian + 
+          own_home + 
+          no_car, df_scaled, subset = region==var)
+  tidy_list[[i]] <- tidy(reg_list[[i]])
+  glance_list[[i]] <- glance(reg_list[[i]])
+  
+  i = i+1
+}
+names(reg_list)<-levels(df_scaled$region)
+names(tidy_list)<-levels(df_scaled$region)
+names(glance_list)<-levels(df_scaled$region)
+
+reg_full_plot_list <- list()
+i=1
+for (var in levels(df_scaled$region)){
+  
+  reg_full_plot_list[[i]] <- ggplot(tidy_list[[i]][-1,], aes(x=estimate, y=term,
+                                                        xmin=estimate - qnorm(0.975)*std.error,
+                                                        xmax=estimate + qnorm(0.975)*std.error, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=2) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = levels(df_scaled$region)[i],
+         subtitle = paste0("R^2: ",round(glance_list[[i]]$adj.r.squared,2))) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=12,fig.height=9}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+(plot_spacer()|plot_spacer()|reg_full_plot_list[[4]]|plot_spacer()) / 
+  (plot_spacer()|reg_full_plot_list[[5]]|reg_full_plot_list[[10]]|plot_spacer()) / 
+  (reg_full_plot_list[[8]]|reg_full_plot_list[[9]]|reg_full_plot_list[[2]]|reg_full_plot_list[[1]]) /
+  (plot_spacer()|reg_full_plot_list[[7]]|reg_full_plot_list[[3]]|reg_full_plot_list[[6]]) +
+  plot_annotation(
+    title = "Multivariate regression with region as fixed effect",
+    subtitle = "10 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+vif_reg1 <- car::vif(reg1) |> 
+  as.data.frame() |> 
+  rownames_to_column(var="Variable") |> 
+  rename("Variance Inflation Factor" = `car::vif(reg1)`) |> 
+  mutate(`Variance Inflation Factor` = round(`Variance Inflation Factor`,3))
+
+kable(vif_reg1) |> 
+  kable_paper(full_width=F) |> 
+  column_spec(2, color = ifelse(vif_reg1$`Variance Inflation Factor` > 8, "red", "green"))
+
+```
+
+
+### Reduced Multivariate (x5) models by region
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+reg2 <- lm(con_swing ~ degree_educated + 
+             younger_adults + 
+             not_good_health + 
+             white + 
+             no_car, df_scaled)
+summary(reg2)
+car::vif(reg2)
+
+tidy2 <- tidy(reg2)[-1,] |> 
+  inner_join(var_justification, by=c("term"="variable")) |> 
+  mutate(term = fct_reorder(term, estimate, .desc=TRUE))
+
+glance2 <- glance(reg2)
+
+ggplot(tidy2, aes(x=estimate, y=term,
+                 xmin=estimate - qnorm(0.975)*std.error,
+                 xmax=estimate + qnorm(0.975)*std.error,
+                 colour=jcolour)) + 
+  scale_colour_identity() + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", fill="white", shape=21, size=3) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Output from reduced multivariate model",
+       subtitle = paste0("Butler swing to Conservatives by 4 demographic composition variables. \nAdjusted R^2: ",
+                         round(glance2$adj.r.squared,2)))
+
+```
+
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+reg_list <- list()
+tidy_list <- list()
+glance_list <- list()
+i=1
+
+for (var in levels(df_scaled$region)){
+  reg_list[[i]] <- lm(con_swing ~ degree_educated + 
+                        younger_adults + 
+                        not_good_health + 
+                        white + 
+                        no_car, df_scaled, subset = region==var)
+  tidy_list[[i]] <- tidy(reg_list[[i]])
+  glance_list[[i]] <- glance(reg_list[[i]])
+  
+  i = i+1
+}
+names(reg_list)<-levels(df_scaled$region)
+names(tidy_list)<-levels(df_scaled$region)
+names(glance_list)<-levels(df_scaled$region)
+
+reg_reduced_plot_list <- list()
+i=1
+for (var in levels(df_scaled$region)){
+  
+  reg_reduced_plot_list[[i]] <- ggplot(tidy_list[[i]][-1,], aes(x=estimate, y=term,
+                                                        xmin=estimate - qnorm(0.975)*std.error,
+                                                        xmax=estimate + qnorm(0.975)*std.error, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = levels(df_scaled$region)[i],
+         subtitle = paste0("R^2: ",round(glance_list[[i]]$adj.r.squared,2))) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+(plot_spacer()|plot_spacer()|reg_reduced_plot_list[[4]]|plot_spacer()) / 
+  (plot_spacer()|reg_reduced_plot_list[[5]]|reg_reduced_plot_list[[10]]|plot_spacer()) / 
+  (reg_reduced_plot_list[[8]]|reg_reduced_plot_list[[9]]|reg_reduced_plot_list[[2]]|reg_reduced_plot_list[[1]]) /
+  (plot_spacer()|reg_reduced_plot_list[[7]]|reg_reduced_plot_list[[3]]|reg_reduced_plot_list[[6]]) +
+  plot_annotation(
+    title = "Reduced multivariate regression with region as fixed effect",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+vif_reg2 <- car::vif(reg2) |> 
+  as.data.frame() |> 
+  rownames_to_column(var="Variable") |> 
+  rename("Variance Inflation Factor" = `car::vif(reg2)`) |> 
+  mutate(`Variance Inflation Factor` = round(`Variance Inflation Factor`,3))
+
+kable(vif_reg2) |> 
+  kable_paper(full_width=F) |> 
+  column_spec(2, color = ifelse(vif_reg2$`Variance Inflation Factor` > 8, "red", "green"))
+
+```
+
+
+Attempt to quantify the (administrative) scale at which our candidate explanatory variables operate using a multi-level modelling framework that considers constituencies within regions of England and Wales. 
+
+## Mixed models
+
+Given the fact that our data are hierarchically structured (constituencies sit within regions) hierarchical multi-level modelling may be more appropriate to modelling this sort of regional grouping. Multi-level modelling uses partial pooling to make estimated coefficients more conservative where there are comparatively few observations in particular groupings.
+
+Using `lme4` and `mgcv`
+
+### Random intercept with fixed effect
+
+with `lme4`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm1 <- lmer(con_swing ~ 
+              degree_educated + 
+              younger_adults + 
+              not_good_health + 
+              white + 
+              no_car + 
+              (1|region), 
+            df_scaled)
+
+# for ICC
+vars <- lapply(summary(mm1)$varcor, diag)
+resid_var <- attr(summary(mm1)$varcor, "sc")^2
+total_var <- sum(sapply(vars, sum), resid_var)
+
+# ICC random intercepts:
+icc_mm1 <- sapply(vars, function(x) x[1]) / total_var
+
+library(broom.mixed) # extract tidy output
+library(merTools) # with plot functions
+
+mm1_fix <- broom.mixed::tidy(mm1, effects="fixed", conf.int=TRUE, conf.method = "profile") |> 
+  mutate(term = fct_reorder(term, estimate))
+mm1_rand <- broom.mixed::tidy(mm1, effects="ran_vals", conf.int=TRUE)|> 
+  mutate(term = fct_reorder(term, estimate))
+
+
+p1_mm1 <- ggplot(mm1_fix, aes(x=estimate, y=term,
+                 xmin=conf.low,
+                 xmax=conf.high,
+                 fill=estimate)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects")
+
+p2_mm1 <- ggplot(mm1_rand, aes(x=estimate, y=level,
+                 xmin=conf.low,
+                 xmax=conf.high,
+                 fill=estimate)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Random intercept")
+
+p1_mm1 + p2_mm1 + plot_annotation(title = "Mixed Model: Random intercept and fixed effects",
+                                  subtitle = paste0("Butler swing to Conservatives by 5 demographic composition variables \nAIC: ",
+                                                    round(AIC(mm1)), ", ICC: ",round(icc_mm1,2)))
+
+```
+
+
+### Uncorrelated effects mixed model ('||'-style in `lme4`)
+
+with `mgcv`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+# both 2 and 2.2 and 2.3 are the same
+# mm2 <- lmer(con_swing ~ 
+#               degree_educated + 
+#               younger_adults + 
+#               not_good_health + 
+#               white + 
+#               no_car +
+#               (1|region) + 
+#               (0+degree_educated|region) + 
+#               (0+younger_adults|region) + 
+#               (0+not_good_health|region) + 
+#               (0+white|region) + 
+#               (0+no_car|region), 
+#             df_scaled)
+# 
+# summary(mm2)
+# 
+mm2.2 <- lmer(con_swing ~
+              degree_educated +
+              younger_adults +
+              not_good_health +
+              white +
+              no_car +
+              (1+degree_educated+younger_adults+not_good_health+white+no_car||region),
+            df_scaled)
+
+# summary(mm2.2)
+
+mm2.3 <- gam(con_swing ~
+               degree_educated +
+               younger_adults +
+               not_good_health +
+               white +
+               no_car +
+               s(region, bs="re") + 
+               s(degree_educated,region, bs="re") + 
+               s(younger_adults,region, bs="re") + 
+               s(not_good_health,region, bs="re") + 
+               s(white,region, bs="re") + 
+               s(no_car,region, bs="re"), 
+             data=df_scaled, method="REML")
+
+summary(mm2.3)
+
+
+# install.packages("devtools")
+# devtools::install_github("m-clark/gammit")
+library(gammit) # for pulling out ran and fixed effs
+# 3x functions below:
+
+extract_vc(mm2.3)
+
+fe_mm2.3 <- extract_fixed(mm2.3, ci_level = 0.95, digits = 3) |>  
+  mutate(term = fct_reorder(term, value))
+
+re_mm2.3 <- extract_ranef(mm2.3, ci_level = 0.95, digits = 3) |>  
+  mutate(term = fct_reorder(effect, value))
+
+ggplot(fe_mm2.3, aes(x=value, y=term,
+                 xmin=lower_2.5,
+                 xmax=upper_97.5, 
+                 fill=value)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+  scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects from mixed model",
+       subtitle = paste0("Butler swing to Conservatives by 5 demographic composition variables. \nAIC: ",
+                         round(AIC(mm2.3))))
+
+```
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm_plot_list1 <- list()
+i=1
+for (var in levels(df_scaled$region)){
+  mmtemp <- re_mm2.3[re_mm2.3$group==levels(df_scaled$region)[i],]
+  mm_plot_list1[[i]] <- ggplot(mmtemp, aes(x=value, y=effect,
+                                                        xmin=lower_2.5,
+                                                        xmax=upper_97.5, 
+                                                        fill=value)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = levels(df_scaled$region)[i]) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+(plot_spacer()|plot_spacer()|mm_plot_list1[[4]]|plot_spacer()) / 
+  (plot_spacer()|mm_plot_list1[[5]]|mm_plot_list1[[10]]|plot_spacer()) / 
+  (mm_plot_list1[[8]]|mm_plot_list1[[9]]|mm_plot_list1[[2]]|mm_plot_list1[[1]]) /
+  (plot_spacer()|mm_plot_list1[[7]]|mm_plot_list1[[3]]|mm_plot_list1[[6]]) +
+  plot_annotation(
+    title = "Random effects from mixed model",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+
+```
+
+
+
+### Uncorrelated effects with geo smoothing mixed model ('||'-style in `lme4`)
+
+with `mgcv`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df_scaled_sf <- df_scaled |> 
+  mutate(constituency_name = df$constituency_name, 
+         geometry = df$geometry) |> 
+  st_as_sf()
+
+df_scaled_sf |> st_intersects() |> 
+  map_int(~length(.x)) %>% {
+    which(. == 1)} -> temp
+bufs <- rep(0,nrow(df_scaled_sf))
+bufs[temp] <- 2000 # just enough to give Isle of Wight neighbours
+nlistconst <- df_scaled_sf |> st_buffer(dist=bufs) |> 
+  st_intersects() |> imap(~setdiff(.x,.y))
+names(nlistconst) <- df_scaled_sf$constituency_name
+
+mm2.5 <- gam(con_swing ~
+               degree_educated +
+               younger_adults +
+               not_good_health +
+               white +
+               no_car +
+               s(region, bs="re") + 
+               s(degree_educated,region, bs="re") + 
+               s(younger_adults,region, bs="re") + 
+               s(not_good_health,region, bs="re") + 
+               s(white,region, bs="re") + 
+               s(no_car,region, bs="re") +
+               s(constituency_name,bs='mrf',xt=list(nb=nlistconst),k=285), 
+             data=df_scaled_sf, method="REML")
+
+summary(mm2.5)
+
+temp <- tibble(
+  degree_educated=rep(1,nrow(df_scaled_sf)),
+  younger_adults=rep(1,nrow(df_scaled_sf)),
+  not_good_health=rep(1,nrow(df_scaled_sf)),
+  white=rep(1,nrow(df_scaled_sf)),
+  no_car=rep(1,nrow(df_scaled_sf)),
+  region=rep(1,nrow(df_scaled_sf)),
+  constituency_name=df_scaled_sf$constituency_name)
+
+
+mm2.5df <- predict(mm2.5,newdata = temp,type = "terms") |> 
+  as.data.frame() |> 
+  cbind(df |> select(constituency_name,
+                     geometry,
+                     region)) |> 
+  as.data.frame() |> 
+  st_as_sf(crs=4326)
+
+p1_mm2.5 <- ggplot(mm2.5df) + 
+  geom_sf(aes(fill=`s(constituency_name)`), lwd=0.1) + 
+  scale_fill_gradient2(low="darkred",mid="white",high="darkblue",midpoint = 0) + 
+  coord_sf(datum=NA) + 
+  geom_sf(data=regions, fill=NA) + 
+  coord_sf(datum=NA) + 
+  theme_bw() +
+  labs(fill = "geographic\neffect",
+       title = "Random neighbourhood effect",
+       subtitle = "by constituency")
+
+extract_vc(mm2.5)
+
+fe_mm2.5 <- extract_fixed(mm2.5, ci_level = 0.95, digits = 3) |>  
+  mutate(term = fct_reorder(term, value))
+
+re_mm2.5 <- extract_ranef(mm2.5, ci_level = 0.95, digits = 3) |>  
+  mutate(term = fct_reorder(effect, value))
+
+p2_mm2.5 <- ggplot(fe_mm2.5, aes(x=value, y=term,
+                 xmin=lower_2.5,
+                 xmax=upper_97.5, 
+                 fill=value)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+  scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects from mixed model",
+       subtitle = paste0("Butler swing to Conservatives by 5 demographic composition variables. \nAIC: ",
+                         round(AIC(mm2.3))))
+
+ggarrange(p2_mm2.5,p1_mm2.5)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm_plot_list3 <- list()
+i=1
+for (var in levels(df_scaled$region)){
+  mmtemp <- re_mm2.5[re_mm2.5$group==levels(df_scaled$region)[i],]
+  mm_plot_list3[[i]] <- ggplot(mmtemp, aes(x=value, y=effect,
+                                                        xmin=lower_2.5,
+                                                        xmax=upper_97.5, 
+                                                        fill=value)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = levels(df_scaled$region)[i]) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+(plot_spacer()|plot_spacer()|mm_plot_list3[[4]]|plot_spacer()) / 
+  (plot_spacer()|mm_plot_list3[[5]]|mm_plot_list3[[10]]|plot_spacer()) / 
+  (mm_plot_list3[[8]]|mm_plot_list3[[9]]|mm_plot_list3[[2]]|mm_plot_list3[[1]]) /
+  (plot_spacer()|mm_plot_list3[[7]]|mm_plot_list3[[3]]|mm_plot_list3[[6]]) +
+  plot_annotation(
+    title = "Random effects from mixed model",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+
+```
+
+
+### Correlated effects mixed model ('|'-style in `lme4`)
+
+
+with `lme4`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm2.1 <- lmer(con_swing ~
+              degree_educated +
+              younger_adults +
+              not_good_health +
+              white +
+              no_car +
+              (1+degree_educated+younger_adults+not_good_health+white+no_car|region), 
+            df_scaled)
+
+summary(mm2.1)
+
+# for ICC
+vars <- lapply(summary(mm2.1)$varcor, diag)
+resid_var <- attr(summary(mm2.1)$varcor, "sc")^2
+total_var <- sum(sapply(vars, sum), resid_var)
+
+# ICC # with random slopes
+icc_mm2.1 <- sapply(vars, sum)/total_var
+
+
+mm2.1_fix <- broom.mixed::tidy(mm2.1, effects="fixed", conf.int=TRUE, conf.method = "profile") |> 
+  mutate(term = fct_reorder(term, estimate))
+mm2.1_rand <- broom.mixed::tidy(mm2.1, effects="ran_vals", conf.int=TRUE)|> 
+  mutate(term = fct_reorder(term, estimate))
+
+like_rat_pval <- as.data.frame(anova(mm2.2,mm2.1))[2,8]
+
+ggplot(mm2.1_fix, aes(x=estimate, y=term,
+                 xmin=conf.low,
+                 xmax=conf.high,
+                 fill=estimate)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects from mixed model",
+       subtitle = paste0(
+         "Butler swing to Conservatives by 5 demographic composition variables. \nAIC: ",
+         round(AIC(mm2.1),2),
+         ", ICC: ",
+         round(icc_mm2.1,2),"\nlike/ratio to uncorrelated model pval: ",round(like_rat_pval,3))
+       )
+
+# confint_boot_mm2 <- confint(mm2, method="boot", oldNames=F)
+# kbl(confint_boot_mm2)
+#
+# REsim(mm2)
+# FEsim(mm2)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm_plot_list2 <- list()
+i=1
+for (var in levels(df_scaled$region)){
+  mmtemp <- mm2.1_rand[mm2.1_rand$level==levels(df_scaled$region)[i],]
+  mm_plot_list2[[i]] <- ggplot(mmtemp, aes(x=estimate, y=term,
+                                                        xmin=conf.low,
+                                                        xmax=conf.high, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = levels(df_scaled$region)[i]) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+(plot_spacer()|plot_spacer()|mm_plot_list2[[4]]|plot_spacer()) / 
+  (plot_spacer()|mm_plot_list2[[5]]|mm_plot_list2[[10]]|plot_spacer()) / 
+  (mm_plot_list2[[8]]|mm_plot_list2[[9]]|mm_plot_list2[[2]]|mm_plot_list2[[1]]) /
+  (plot_spacer()|mm_plot_list2[[7]]|mm_plot_list2[[3]]|mm_plot_list2[[6]]) +
+  plot_annotation(
+    title = "Random effects from mixed model",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+
+```
+
+
+```{r}
+temp_mm2.1 <- df |> 
+  select(con_swing) |> 
+  mutate(resids = resid(mm2.1))
+
+df_nb <- poly2nb(df)
+df_wts <- nb2listw(df_nb, zero.policy = TRUE)
+
+df_moran <- moran.test(temp_mm2.1$resids, df_wts, zero.policy = TRUE)
+
+ggplot(temp_mm2.1) + 
+  geom_sf(aes(fill=resids), lwd=0.1) + 
+  scale_fill_gradient2(low="darkblue",mid="white",high="darkred",midpoint=0) + 
+  theme_bw() + 
+  labs(title = "Residuals: Varying slope model",
+       subtitle = paste0("Moran's-I: ",round(df_moran$estimate[1],2)))
+
+```
+
+
+
+
+### Correlated effects mixed model by cluster ('|'-style in `lme4`)
+
+with `lme4`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df_scaled2 <- df_scaled |> 
+  mutate(cluster = temp_nogeo4$cluster)
+mm2.6 <- lmer(con_swing ~
+              degree_educated +
+              younger_adults +
+              not_good_health +
+              white +
+              no_car +
+              (1+degree_educated+younger_adults+not_good_health+white+no_car|cluster), 
+            df_scaled2)
+
+summary(mm2.6)
+
+# for ICC
+vars <- lapply(summary(mm2.6)$varcor, diag)
+resid_var <- attr(summary(mm2.6)$varcor, "sc")^2
+total_var <- sum(sapply(vars, sum), resid_var)
+
+# ICC # with random slopes
+icc_mm2.6 <- sapply(vars, sum)/total_var
+
+mm2.6_fix <- broom.mixed::tidy(mm2.6, effects="fixed", conf.int=TRUE) |> 
+  mutate(term = fct_reorder(term, estimate))
+mm2.6_rand <- broom.mixed::tidy(mm2.6, effects="ran_vals", conf.int=TRUE)
+
+
+ggplot(mm2.6_fix, aes(x=estimate, y=term,
+                      xmin=conf.low,
+                      xmax=conf.high,
+                      fill=estimate)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+  scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects from mixed model",
+       subtitle = paste0(
+         "Butler swing to Conservatives by 5 demographic composition variables. \nAIC: ",
+         round(AIC(mm2.6),2),
+         ", ICC: ",
+         round(icc_mm2.6,2)
+       )
+  )
+
+
+# confint_boot_mm2 <- confint(mm2, method="boot", oldNames=F)
+# kbl(confint_boot_mm2)
+#
+# REsim(mm2)
+# FEsim(mm2)
+
+```
+
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm2.6_rand <- mm2.6_rand |> 
+  mutate(area = case_when(level==1 ~ "East",
+                     level==2 ~ "South West",
+                     level==3 ~ "South & London",
+                     TRUE ~ "North"))
+
+mm_plot_list4 <- list()
+i=1
+for (var in levels(df_scaled2$cluster)){
+  mmtemp <- mm2.6_rand[mm2.6_rand$level==levels(df_scaled2$cluster)[i],]
+  mm_plot_list4[[i]] <- ggplot(mmtemp, aes(x=estimate, y=term,
+                                                        xmin=conf.low,
+                                                        xmax=conf.high, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = paste0(levels(df_scaled2$cluster)[i]," - ",mmtemp$area)) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+cluster_sf <- temp_nogeo4 |> 
+  group_by(cluster) |> 
+  summarise()
+cluster_sf <- cluster_sf |> 
+  mutate(area = case_when(cluster==1 ~ "East",
+                     cluster==2 ~ "South West",
+                     cluster==3 ~ "South & London",
+                     TRUE ~ "North"))
+
+cluster4_map_leg <- ggplot() + 
+  geom_sf(data=cluster_sf, aes(fill=cluster, label=area), lwd=0.01) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set2") + 
+  geom_sf(data=regions, fill=NA) + 
+  coord_sf(datum=NA) + 
+  geom_sf_label_repel(data=cluster_sf, aes(label=area)) + 
+  labs(title = "Clusters x4",
+       subtitle = "based on GW correlation of 10 variables\nwith Butler swing") + 
+  theme_bw() + 
+  theme(plot.subtitle = element_text(size=9))
+
+(mm_plot_list4[[4]]|plot_spacer()) /
+    (mm_plot_list4[[2]]|mm_plot_list4[[1]]) /
+    (plot_spacer()|mm_plot_list4[[3]]) | cluster4_map_leg
+  plot_annotation(
+    title = "Random effects from mixed model",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16)))
+  
+  
+```
+
+
+```{r, fig.width=8, fig.height=10}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+cluster4_map_leg <- ggplot() + 
+  geom_sf(data=cluster_sf, aes(fill=cluster, label=area), lwd=0.01) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set2") + 
+  geom_sf(data=regions, fill=NA) + 
+  coord_sf(datum=NA) + 
+  geom_sf_label_repel(data=cluster_sf, aes(label=area), size=3) + 
+  labs(title = "Clusters x4",
+       subtitle = "based on GW correlation of 10 variables\nwith Butler swing") + 
+  theme_bw() + 
+  theme(plot.subtitle = element_text(size=9))
+
+mm2.6_rand2 <- mm2.6_rand |> 
+  filter(term != "(Intercept)") |> 
+  mutate(justification = c(
+    rep("post-industrial / knowledge economy",4),
+    rep("post-industrial / knowledge economy",4),
+    rep("diversity / values / outcomes",4),
+    rep("diversity / values / outcomes",4),
+    rep("metropolitan / 'big city'",4)),
+    area = case_when(level==1 ~ "East",
+                     level==2 ~ "South West",
+                     level==3 ~ "South & London",
+                     TRUE ~ "North")
+    )
+
+
+mm_plot_list10 <- list()
+i=1
+for (var in levels(df_scaled2$cluster)){
+  mmtemp <- mm2.6_rand2[mm2.6_rand2$level==levels(df_scaled2$cluster)[i],]
+  mm_plot_list10[[i]] <- ggplot(mmtemp, aes(x=estimate, y=term,
+                                                        xmin=conf.low,
+                                                        xmax=conf.high, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = paste0(levels(df_scaled2$cluster)[i]," - ",mmtemp$area)) + 
+    guides(fill="none") + 
+    xlim(-3.5,3) + 
+    facet_wrap(~justification, nrow = 3, scales = "free")
+  
+  i= i+1
+}
+
+((mm_plot_list10[[4]]|plot_spacer()|cluster4_map_leg) /
+    (mm_plot_list10[[2]]|mm_plot_list10[[1]]) /
+    (plot_spacer()|mm_plot_list10[[3]]))
+
+```
+
+
+### Correlated effects mixed model with LibDems ('|'-style in `lme4`)
+
+with `lme4`
+
+```{r, fig.width=12, fig.height=4}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+df_scaled2 <- df_scaled |> 
+  mutate(cluster = temp_nogeo4$cluster,
+         libdem = df$ld_19,
+         libdem = scale(ifelse(is.na(libdem),0,libdem)))
+
+mm2.7 <- lmer(con_swing ~
+              degree_educated +
+              younger_adults +
+              not_good_health +
+              white +
+              no_car + 
+                libdem + 
+              (1+degree_educated+younger_adults+not_good_health+white+no_car+libdem|cluster), 
+            df_scaled2)
+
+summary(mm2.7)
+
+# for ICC
+vars <- lapply(summary(mm2.7)$varcor, diag)
+resid_var <- attr(summary(mm2.7)$varcor, "sc")^2
+total_var <- sum(sapply(vars, sum), resid_var)
+
+# ICC # with random slopes
+icc_mm2.7 <- sapply(vars, sum)/total_var
+
+
+
+mm2.7_fix <- broom.mixed::tidy(mm2.7, effects="fixed", conf.int=TRUE) |> 
+  mutate(term = fct_reorder(term, estimate))
+mm2.7_rand <- broom.mixed::tidy(mm2.7, effects="ran_vals", conf.int=TRUE)
+
+
+ggplot(mm2.7_fix, aes(x=estimate, y=term,
+                 xmin=conf.low,
+                 xmax=conf.high,
+                 fill=estimate)) + 
+  geom_errorbar(lwd=1.5) + 
+  geom_point(colour="black", shape=21, size=3) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+  geom_vline(xintercept = 0, colour="red") + 
+  theme_bw() + 
+  guides(fill="none") + 
+  labs(x="coefficient effect", 
+       y=NULL,
+       title = "Fixed effects from mixed model",
+       subtitle = paste0(
+         "Butler swing to Conservatives by 5 demographic composition variables. \nAIC: ",
+         round(AIC(mm2.6),2),
+         ", ICC: ",
+         round(icc_mm2.7,2)
+         )
+       )
+
+# confint_boot_mm2 <- confint(mm2, method="boot", oldNames=F)
+# kbl(confint_boot_mm2)
+#
+# REsim(mm2)
+# FEsim(mm2)
+
+```
+
+
+```{r}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+mm2.7_rand <- mm2.7_rand |> 
+  mutate(area = case_when(level==1 ~ "East",
+                     level==2 ~ "South West",
+                     level==3 ~ "South & London",
+                     TRUE ~ "North"))
+
+mm_plot_list9 <- list()
+i=1
+for (var in levels(df_scaled2$cluster)){
+  mmtemp <- mm2.7_rand[mm2.7_rand$level==levels(df_scaled2$cluster)[i],]
+  mm_plot_list9[[i]] <- ggplot(mmtemp, aes(x=estimate, y=term,
+                                                        xmin=conf.low,
+                                                        xmax=conf.high, 
+                                                        fill=estimate)) + 
+    geom_errorbar(lwd=0.5, colour="black") + 
+    geom_point(shape=21, size=2) + 
+    scale_fill_gradient2(low="blue",mid="white",high="red",midpoint = 0) + 
+    geom_vline(xintercept = 0, colour="red") + 
+    theme_bw() + 
+    theme(plot.title =element_text(size=10, face='bold'),
+          plot.subtitle =element_text(size=8)) + 
+    labs(x="coefficient effect", 
+         y=NULL, 
+         title = paste0(levels(df_scaled2$cluster)[i]," - ",mmtemp$area)) + 
+    guides(fill="none")
+  
+  i= i+1
+}
+
+```
+
+
+In cluster 1, the North, `libdem` effect is not significant.
+
+In cluster 3, the East, increase in `libdim` is associated with increase in `con_swing`. This suggests the `libdem` votes are at the expense of Labour.
+
+In clusters 2 and 4, the South and South West, increase in `libdem` is associated with decrease in `con_swing`. This suggests that in these regions, Labour votes have switched to the Conservatives (as an increase in `libdem` votes increases `conswing` - which happens as a results of higher Conservative or lower Labour percentage share).
+
+In cluster 2, the south west, `degree_educated` becomes significant and a positive effect with the inclusion of `libdem`.
+
+```{r, fig.width=10,fig.height=8}
+#| code-fold: false
+#| message: false
+#| warning: false
+#| echo: false
+
+cluster4_map_leg <- ggplot() + 
+  geom_sf(data=cluster_sf, aes(fill=cluster,label=area), lwd=0.01) + 
+  coord_sf(datum=NA) + 
+  scale_fill_brewer(palette = "Set2") + 
+  geom_sf(data=regions, fill=NA) + 
+  coord_sf(datum=NA) + 
+  geom_sf_label_repel(data=cluster_sf, aes(label=area)) + 
+  labs(title = "Clusters x4",
+       subtitle = "based on GW correlation of 10 variables\nwith Butler swing") + 
+  theme_bw() + 
+  theme(plot.subtitle = element_text(size=9))
+
+((mm_plot_list9[[4]]|plot_spacer()) /
+    (mm_plot_list9[[2]]|mm_plot_list9[[1]]) /
+    (plot_spacer()|mm_plot_list9[[3]])) | cluster4_map_leg
+  plot_annotation(
+    title = "Random effects from mixed model",
+    subtitle = "5 variables, by region",
+    theme = theme(plot.title = element_text(size = 16))
+  )
+  
+```
+
+
+
+
+
+
+
+
+
